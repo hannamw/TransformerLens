@@ -182,6 +182,9 @@ OFFICIAL_MODEL_NAMES = [
     "01-ai/Yi-34B",
     "01-ai/Yi-6B-Chat",
     "01-ai/Yi-34B-Chat",
+    "allenai/OLMo-1B-hf",
+    "allenai/OLMo-7B-hf",
+    "allenai/OLMo-1.7-7B-hf",
 ]
 """Official model names for models on HuggingFace."""
 
@@ -595,6 +598,9 @@ MODEL_ALIASES = {
     "01-ai/Yi-34B": ["yi-34b", "Yi-34B"],
     "01-ai/Yi-6B-Chat": ["yi-6b-chat", "Yi-6B-Chat"],
     "01-ai/Yi-34B-Chat": ["yi-34b-chat", "Yi-34B-Chat"],
+    "allenai/OLMo-1B-hf": ["olmo-1b", "OLMo-1B"],
+    "allenai/OLMo-7B-hf": ["olmo-7b", "OLMo-7B-hf", "olmo-7b-hf", "OLMo-7B-hf"],
+    "allenai/OLMo-1.7-7B-hf": ["olmo-1.7-7b", "OLMo-1.7-7B-hf", "olmo-1.7-7b-hf", "OLMo-1.7-7B-hf"],
 }
 """Model aliases for models on HuggingFace."""
 
@@ -1141,6 +1147,46 @@ def convert_hf_model_config(model_name: str, **kwargs):
             "gated_mlp": True,
             "final_rms": True,
         }
+    elif official_model_name.startswith("allenai/OLMo-1B"):
+        # same architecture for LLaMA and Llama-2
+        cfg_dict = {
+            "d_model": 2048,
+            "d_head": 2048 // 16,
+            "n_heads": 16,
+            "d_mlp": 8192,
+            "n_layers": 16,
+            "n_ctx": 2048,
+            "eps": 1e-5,
+            "d_vocab": 50304,
+            "act_fn": "silu",
+            "normalization_type": "LN",
+            "positional_embedding_type": "rotary",
+            "rotary_adjacent_pairs": False,
+            "rotary_dim": 2048 // 16,
+            "final_rms": False,
+            "gated_mlp": True,
+            "tokenizer_prepends_bos": False,
+        }
+    elif official_model_name.startswith(("allenai/OLMo-7B", "allenai/OLMo-1.7-7B")):
+        # same architecture for LLaMA and Llama-2
+        cfg_dict = {
+            "d_model": 4096,
+            "d_head": 4096 // 32,
+            "n_heads": 32,
+            "d_mlp": 11008,
+            "n_layers": 32,
+            "n_ctx": 2048,
+            "eps": 1e-5,
+            "d_vocab": 50304,
+            "act_fn": "silu",
+            "normalization_type": "LN",
+            "positional_embedding_type": "rotary",
+            "rotary_adjacent_pairs": False,
+            "rotary_dim": 2048 // 16,
+            "final_rms": False,
+            "gated_mlp": True,
+            "tokenizer_prepends_bos": False,
+        }
     else:
         raise NotImplementedError(f"{architecture} is not currently supported.")
     # All of these models use LayerNorm
@@ -1502,6 +1548,8 @@ def get_pretrained_state_dict(
             state_dict = convert_phi_weights(hf_model, cfg)
         elif cfg.original_architecture == "GemmaForCausalLM":
             state_dict = convert_gemma_weights(hf_model, cfg)
+        elif cfg.original_architecture == "OlmoForCausalLM":
+            state_dict = convert_olmo_weights(hf_model, cfg)
         else:
             raise ValueError(
                 f"Loading weights from the architecture is not currently supported: {cfg.original_architecture}, generated from model name {cfg.model_name}. Feel free to open an issue on GitHub to request this feature."
@@ -2652,6 +2700,91 @@ def convert_gemma_weights(gemma, cfg: HookedTransformerConfig):
 
     state_dict["unembed.W_U"] = gemma.lm_head.weight.T
     state_dict["unembed.b_U"] = torch.zeros(cfg.d_vocab, dtype=cfg.dtype)
+
+    return state_dict
+
+
+def convert_olmo_weights(olmo, cfg: HookedTransformerConfig):
+    state_dict = {}
+
+    state_dict["embed.W_E"] = olmo.model.embed_tokens.weight
+    weight_device = state_dict["embed.W_E"].device
+
+    # olmo has no biases anywhere and deals with everything else roughly like
+    # llama with different names
+
+    assert cfg.d_mlp is not None  # keep mypy happy
+
+    for l in range(cfg.n_layers):
+
+        state_dict[f"blocks.{l}.ln1.w"] = torch.ones(
+            cfg.d_model, dtype=cfg.dtype, device=weight_device
+        )
+        state_dict[f"blocks.{l}.ln1.b"] = torch.zeros(
+            cfg.d_model, dtype=cfg.dtype, device=weight_device
+        )
+
+        W_Q = olmo.model.layers[l].self_attn.q_proj.weight
+        W_K = olmo.model.layers[l].self_attn.k_proj.weight
+        W_V = olmo.model.layers[l].self_attn.v_proj.weight
+
+        W_Q = einops.rearrange(W_Q, "(n h) m->n m h", n=cfg.n_heads)
+        W_K = einops.rearrange(W_K, "(n h) m->n m h", n=cfg.n_heads)
+        W_V = einops.rearrange(W_V, "(n h) m->n m h", n=cfg.n_heads)
+
+        state_dict[f"blocks.{l}.attn.W_Q"] = W_Q
+        state_dict[f"blocks.{l}.attn.W_K"] = W_K
+        state_dict[f"blocks.{l}.attn.W_V"] = W_V
+
+        state_dict[f"blocks.{l}.attn.b_Q"] = torch.zeros(
+            cfg.n_heads, cfg.d_head, dtype=cfg.dtype, device=weight_device
+        )
+        state_dict[f"blocks.{l}.attn.b_K"] = torch.zeros(
+            cfg.n_heads,
+            cfg.d_head,
+            dtype=cfg.dtype,
+            device=weight_device,
+        )
+        state_dict[f"blocks.{l}.attn.b_V"] = torch.zeros(
+            cfg.n_heads,
+            cfg.d_head,
+            dtype=cfg.dtype,
+            device=weight_device,
+        )
+
+        W_O = olmo.model.layers[l].self_attn.o_proj.weight
+
+        W_O = einops.rearrange(W_O, "m (n h)->n h m", n=cfg.n_heads)
+
+        state_dict[f"blocks.{l}.attn.W_O"] = W_O.to(device=weight_device)
+
+        state_dict[f"blocks.{l}.attn.b_O"] = torch.zeros(
+            cfg.d_model, dtype=cfg.dtype, device=weight_device
+        )
+
+        state_dict[f"blocks.{l}.ln2.w"] = torch.ones(
+            cfg.d_model, dtype=cfg.dtype, device=weight_device
+        )
+        state_dict[f"blocks.{l}.ln2.b"] = torch.zeros(
+            cfg.d_model, dtype=cfg.dtype, device=weight_device
+        )
+
+        state_dict[f"blocks.{l}.mlp.W_in"] = olmo.model.layers[l].mlp.up_proj.weight.T
+        state_dict[f"blocks.{l}.mlp.W_gate"] = olmo.model.layers[l].mlp.gate_proj.weight.T
+        state_dict[f"blocks.{l}.mlp.W_out"] = olmo.model.layers[l].mlp.down_proj.weight.T
+
+        state_dict[f"blocks.{l}.mlp.b_in"] = torch.zeros(
+            cfg.d_mlp, dtype=cfg.dtype, device=weight_device
+        )
+        state_dict[f"blocks.{l}.mlp.b_out"] = torch.zeros(
+            cfg.d_model, dtype=cfg.dtype, device=weight_device
+        )
+
+    state_dict[f"ln_final.w"] = torch.ones(cfg.d_model, dtype=cfg.dtype, device=weight_device)
+    state_dict[f"ln_final.b"] = torch.zeros(cfg.d_model, dtype=cfg.dtype, device=weight_device)
+
+    state_dict["unembed.W_U"] = olmo.lm_head.weight.T
+    state_dict["unembed.b_U"] = torch.zeros(cfg.d_vocab, dtype=cfg.dtype, device=weight_device)
 
     return state_dict
 

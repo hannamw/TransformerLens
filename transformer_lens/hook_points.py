@@ -517,6 +517,14 @@ class HookedRootModule(nn.Module):
         # mypy can't seem to infer this
         names_filter = cast(Callable[[str], bool], names_filter)
 
+        # need to do this to avoid an assertion error
+        if not isinstance(pos_slice, Slice):
+            if isinstance(
+                pos_slice, int
+            ):  # slicing with an int collapses the dimension so this stops the pos dimension from collapsing
+                pos_slice = [pos_slice]
+            pos_slice = Slice(pos_slice)
+
         def save_hook(tensor, hook, is_backward=False):
             hook_name = hook.name
             if is_backward:

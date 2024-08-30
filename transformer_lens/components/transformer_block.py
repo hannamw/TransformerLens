@@ -133,10 +133,10 @@ class TransformerBlock(nn.Module):
                 repeat_along_head_dimension(resid_pre, n_heads=self.cfg.n_heads)
             )
             key_input = self.hook_k_input(
-                repeat_along_head_dimension(resid_pre, n_heads=n_kv_heads)
+                repeat_along_head_dimension(resid_pre, n_heads=self.cfg.n_heads)
             )
             value_input = self.hook_v_input(
-                repeat_along_head_dimension(resid_pre, n_heads=n_kv_heads)
+                repeat_along_head_dimension(resid_pre, n_heads=self.cfg.n_heads)
             )
         else:
             query_input = attn_in

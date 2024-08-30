@@ -177,6 +177,7 @@ OFFICIAL_MODEL_NAMES = [
     "Qwen/Qwen1.5-7B-Chat",
     "Qwen/Qwen1.5-14B",
     "Qwen/Qwen1.5-14B-Chat",
+    'Qwen/Qwen2-1.5B',
     "microsoft/phi-1",
     "microsoft/phi-1_5",
     "microsoft/phi-2",
@@ -1088,6 +1089,11 @@ def convert_hf_model_config(model_name: str, **kwargs):
             "use_attn_scale": True,
             "initializer_range": hf_config.initializer_range,
             "normalization_type": "RMS",
+            "n_key_value_heads": (
+                hf_config.num_key_value_heads
+                if hf_config.num_key_value_heads != hf_config.num_attention_heads
+                else None
+            ),
             "positional_embedding_type": "rotary",
             "rotary_base": hf_config.rope_theta,
             "rotary_adjacent_pairs": False,
@@ -1923,6 +1929,13 @@ def convert_qwen_weights(qwen, cfg: HookedTransformerConfig):
     model = qwen.transformer
     state_dict["embed.W_E"] = model.wte.weight
 
+    # Some models with the Qwen architecture use Grouped Query Attention, and so for these we need to modify
+    # the state dict keys for the K/V attention weight/biases, prepending "_" to the key names.
+    using_gqa = cfg.n_key_value_heads is not None
+    gqa_uscore = "_" if using_gqa else ""
+    # need a cast since MyPy isn't smart enough to realize that using_gqa implies n_key_value_heads is not None
+    n_kv_heads = cast(int, cfg.n_key_value_heads if using_gqa else cfg.n_heads)
+
     assert cfg.d_mlp is not None  # keep mypy happy
 
     for l in range(cfg.n_layers):
@@ -1930,11 +1943,11 @@ def convert_qwen_weights(qwen, cfg: HookedTransformerConfig):
 
         W_Q, W_K, W_V = model.h[l].attn.c_attn.weight.split(split_size=cfg.d_model, dim=0)
         W_Q = einops.rearrange(W_Q, "(n h) m->n m h", n=cfg.n_heads)
-        W_K = einops.rearrange(W_K, "(n h) m->n m h", n=cfg.n_heads)
-        W_V = einops.rearrange(W_V, "(n h) m->n m h", n=cfg.n_heads)
+        W_K = einops.rearrange(W_K, "(n h) m->n m h", n=n_kv_heads)
+        W_V = einops.rearrange(W_V, "(n h) m->n m h", n=n_kv_heads)
         state_dict[f"blocks.{l}.attn.W_Q"] = W_Q
-        state_dict[f"blocks.{l}.attn.W_K"] = W_K
-        state_dict[f"blocks.{l}.attn.W_V"] = W_V
+        state_dict[f"blocks.{l}.attn.{gqa_uscore}W_K"] = W_K
+        state_dict[f"blocks.{l}.attn.{gqa_uscore}W_V"] = W_V
 
         b_Q, b_K, b_V = model.h[l].attn.c_attn.bias.split(split_size=cfg.d_model, dim=0)
         b_Q = einops.rearrange(
@@ -1945,16 +1958,16 @@ def convert_qwen_weights(qwen, cfg: HookedTransformerConfig):
         b_K = einops.rearrange(
             b_K,
             "(n_head d_head) -> n_head d_head",
-            n_head=cfg.n_heads,
+            n_head=n_kv_heads,
         )
         b_V = einops.rearrange(
             b_V,
             "(n_head d_head) -> n_head d_head",
-            n_head=cfg.n_heads,
+            n_head=n_kv_heads,
         )
         state_dict[f"blocks.{l}.attn.b_Q"] = b_Q
-        state_dict[f"blocks.{l}.attn.b_K"] = b_K
-        state_dict[f"blocks.{l}.attn.b_V"] = b_V
+        state_dict[f"blocks.{l}.attn.{gqa_uscore}b_K"] = b_K
+        state_dict[f"blocks.{l}.attn.{gqa_uscore}b_V"] = b_V
 
         W_O = model.h[l].attn.c_proj.weight
         W_O = einops.rearrange(W_O, "m (n h)->n h m", n=cfg.n_heads)
@@ -1987,6 +2000,13 @@ def convert_qwen2_weights(qwen, cfg: HookedTransformerConfig):
 
     state_dict["embed.W_E"] = qwen.model.embed_tokens.weight
 
+    # Some models with the Qwen architecture use Grouped Query Attention, and so for these we need to modify
+    # the state dict keys for the K/V attention weight/biases, prepending "_" to the key names.
+    using_gqa = cfg.n_key_value_heads is not None
+    gqa_uscore = "_" if using_gqa else ""
+    # need a cast since MyPy isn't smart enough to realize that using_gqa implies n_key_value_heads is not None
+    n_kv_heads = cast(int, cfg.n_key_value_heads if using_gqa else cfg.n_heads)
+
     assert cfg.d_mlp is not None  # keep mypy happy
 
     for l in range(cfg.n_layers):
@@ -1996,12 +2016,12 @@ def convert_qwen2_weights(qwen, cfg: HookedTransformerConfig):
         W_K = qwen.model.layers[l].self_attn.k_proj.weight
         W_V = qwen.model.layers[l].self_attn.v_proj.weight
         W_Q = einops.rearrange(W_Q, "(n h) m->n m h", n=cfg.n_heads)
-        W_K = einops.rearrange(W_K, "(n h) m->n m h", n=cfg.n_heads)
-        W_V = einops.rearrange(W_V, "(n h) m->n m h", n=cfg.n_heads)
+        W_K = einops.rearrange(W_K, "(n h) m->n m h", n=n_kv_heads)
+        W_V = einops.rearrange(W_V, "(n h) m->n m h", n=n_kv_heads)
 
         state_dict[f"blocks.{l}.attn.W_Q"] = W_Q
-        state_dict[f"blocks.{l}.attn.W_K"] = W_K
-        state_dict[f"blocks.{l}.attn.W_V"] = W_V
+        state_dict[f"blocks.{l}.attn.{gqa_uscore}W_K"] = W_K
+        state_dict[f"blocks.{l}.attn.{gqa_uscore}W_V"] = W_V
 
         b_Q = qwen.model.layers[l].self_attn.q_proj.bias
         b_Q = einops.rearrange(
@@ -2014,19 +2034,19 @@ def convert_qwen2_weights(qwen, cfg: HookedTransformerConfig):
         b_K = einops.rearrange(
             b_K,
             "(n_head d_head) -> n_head d_head",
-            n_head=cfg.n_heads,
+            n_head=n_kv_heads,
         )
 
         b_V = qwen.model.layers[l].self_attn.v_proj.bias
         b_V = einops.rearrange(
             b_V,
             "(n_head d_head) -> n_head d_head",
-            n_head=cfg.n_heads,
+            n_head=n_kv_heads,
         )
 
         state_dict[f"blocks.{l}.attn.b_Q"] = b_Q
-        state_dict[f"blocks.{l}.attn.b_K"] = b_K
-        state_dict[f"blocks.{l}.attn.b_V"] = b_V
+        state_dict[f"blocks.{l}.attn.{gqa_uscore}b_K"] = b_K
+        state_dict[f"blocks.{l}.attn.{gqa_uscore}b_V"] = b_V
 
         W_O = qwen.model.layers[l].self_attn.o_proj.weight
         W_O = einops.rearrange(W_O, "m (n h)->n h m", n=cfg.n_heads)

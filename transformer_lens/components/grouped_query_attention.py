@@ -134,21 +134,22 @@ class GroupedQueryAttention(AbstractAttention):
         )  # [batch, pos, head_index, d_head]
         k = self.hook_k(
             einsum(
+                # "batch pos kv_head_index d_model"
                 f"{kv_einops_string}, kv_head_index d_model d_head \
                 -> batch pos kv_head_index d_head",
                 key_input,
-                self._W_K,
+                self.W_K,
             )
-            + self._b_K
+            + self.b_K
         )  # [batch, pos, head_index, d_head]
         v = self.hook_v(
             einsum(
                 f"{kv_einops_string}, kv_head_index d_model d_head \
                 -> batch pos kv_head_index d_head",
                 value_input,
-                self._W_V,
+                self.W_V,
             )
-            + self._b_V
+            + self.b_V
         )  # [batch, pos, head_index, d_head]
         return q, k, v
 
@@ -167,7 +168,7 @@ class GroupedQueryAttention(AbstractAttention):
         Returns:
             Float[torch.Tensor, "batch head_index query_pos key_pos"]: The attention scores.
         """
-        k = torch.repeat_interleave(k, dim=2, repeats=self.repeat_kv_heads)
+        # k = torch.repeat_interleave(k, dim=2, repeats=self.repeat_kv_heads)
         return super().calculate_attention_scores(q, k)
 
     def calculate_z_scores(
@@ -185,5 +186,5 @@ class GroupedQueryAttention(AbstractAttention):
         Returns:
             Float[torch.Tensor, "batch head_index query_pos key_pos"]: The z scores.
         """
-        v = torch.repeat_interleave(v, dim=2, repeats=self.repeat_kv_heads)
+        # v = torch.repeat_interleave(v, dim=2, repeats=self.repeat_kv_heads)
         return super().calculate_z_scores(v, pattern)
